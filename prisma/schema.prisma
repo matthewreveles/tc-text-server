@@ -2,8 +2,7 @@
 // Shared schema with Trap App so both hit the same tables.
 
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
