@@ -1,91 +1,98 @@
 // src/services/smsSender.ts
 import axios from "axios";
-import twilio from "twilio";
-import { normalizeUSPhone } from "./normalizePhone";
-
-const TELNYX_API_KEY = process.env.TELNYX_API_KEY;
-const TELNYX_FROM_NUMBER = process.env.TELNYX_FROM_NUMBER;
-const TELNYX_MESSAGING_PROFILE_ID = process.env.TELNYX_MESSAGING_PROFILE_ID;
-
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
+import twilioLib from "twilio";
+import { normalizeUSPhone } from "./normalizePhone.js";
 
 export type SmsSendResult = {
   ok: boolean;
   provider: "telnyx" | "twilio";
   to: string;
-  error?: any;
+  error?: string;
 };
 
+// ─────────────────────────────
+// Environment configuration
+// ─────────────────────────────
+const TELNYX_API_KEY = process.env.TELNYX_API_KEY;
+const TELNYX_PROFILE_ID = process.env.TELNYX_MESSAGING_PROFILE_ID;
+const TELNYX_FROM_NUMBER = process.env.TELNYX_FROM_NUMBER;
+
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_FROM_NUMBER = process.env.TWILIO_PHONE_NUMBER;
+
+// Only initialize Twilio client if creds are present
+const twilio =
+  TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
+    ? twilioLib(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    : null;
+
+// ─────────────────────────────
+// Telnyx
+// ─────────────────────────────
 async function sendViaTelnyx(
   to: string,
-  message: string
+  message: string,
 ): Promise<SmsSendResult> {
-  if (!TELNYX_API_KEY || !TELNYX_FROM_NUMBER || !TELNYX_MESSAGING_PROFILE_ID) {
-    return {
-      ok: false,
-      provider: "telnyx",
-      to,
-      error: new Error("Telnyx not configured"),
-    };
+  if (!TELNYX_API_KEY || !TELNYX_PROFILE_ID || !TELNYX_FROM_NUMBER) {
+    throw new Error("Telnyx configuration missing");
   }
 
   try {
-    const url = "https://api.telnyx.com/v2/messages";
-
-    await axios.post(
-      url,
+    const resp = await axios.post(
+      "https://api.telnyx.com/v2/messages",
       {
         from: TELNYX_FROM_NUMBER,
         to,
         text: message,
-        messaging_profile_id: TELNYX_MESSAGING_PROFILE_ID,
+        messaging_profile_id: TELNYX_PROFILE_ID,
       },
       {
         headers: {
           Authorization: `Bearer ${TELNYX_API_KEY}`,
           "Content-Type": "application/json",
         },
-      }
+        timeout: 15000,
+      },
     );
 
-    return {
-      ok: true,
-      provider: "telnyx",
-      to,
-    };
-  } catch (err: any) {
-    console.error("[SMS][TELNYX_ERROR]", err?.response?.data || err?.message);
+    if (resp.status >= 200 && resp.status < 300) {
+      return {
+        ok: true,
+        provider: "telnyx",
+        to,
+      };
+    }
+
+    throw new Error(`Telnyx responded with status ${resp.status}`);
+  } catch (err) {
+    const msg =
+      err instanceof Error ? err.message : "Unknown Telnyx error";
 
     return {
       ok: false,
       provider: "telnyx",
       to,
-      error: err?.response?.data || err?.message || err,
+      error: msg,
     };
   }
 }
 
+// ─────────────────────────────
+// Twilio (fallback)
+// ─────────────────────────────
 async function sendViaTwilio(
   to: string,
-  message: string
+  message: string,
 ): Promise<SmsSendResult> {
-  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
-    return {
-      ok: false,
-      provider: "twilio",
-      to,
-      error: new Error("Twilio not configured"),
-    };
+  if (!twilio || !TWILIO_FROM_NUMBER) {
+    throw new Error("Twilio configuration missing");
   }
 
-  const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-
   try {
-    await client.messages.create({
-      from: TWILIO_PHONE_NUMBER,
+    await twilio.messages.create({
       to,
+      from: TWILIO_FROM_NUMBER,
       body: message,
     });
 
@@ -94,37 +101,35 @@ async function sendViaTwilio(
       provider: "twilio",
       to,
     };
-  } catch (err: any) {
-    console.error("[SMS][TWILIO_ERROR]", err?.message || err);
+  } catch (err) {
+    const msg =
+      err instanceof Error ? err.message : "Unknown Twilio error";
 
     return {
       ok: false,
       provider: "twilio",
       to,
-      error: err?.message || err,
+      error: msg,
     };
   }
 }
 
-/**
- * Main entry point used by routes:
- * - normalizes the phone number
- * - validates that it’s usable
- * - tries Telnyx first, then Twilio as fallback
- */
+// ─────────────────────────────
+// Public API used by routes
+// ─────────────────────────────
 export async function sendSmsToNumber(
-  rawPhone: string,
-  message: string
+  rawTo: string,
+  message: string,
 ): Promise<SmsSendResult> {
-  const normalized = normalizeUSPhone(rawPhone);
+  const normalized = normalizeUSPhone(rawTo);
 
-  // If we can't normalize, bail out cleanly (no null passed to providers)
+  // Guard against bad phone numbers from forms, etc.
   if (!normalized) {
     return {
       ok: false,
-      provider: "telnyx", // arbitrary, just to fill the union
-      to: rawPhone,
-      error: new Error("Invalid or unsupported phone number"),
+      provider: "telnyx", // first provider we *would* have used
+      to: rawTo,
+      error: "Invalid phone number",
     };
   }
 
@@ -136,10 +141,27 @@ export async function sendSmsToNumber(
     return telnyxResult;
   }
 
-  // Fallback to Twilio
-  const twilioResult = await sendViaTwilio(to, message);
-  return twilioResult;
+  // Fallback to Twilio if configured
+  if (twilio) {
+    const twilioResult = await sendViaTwilio(to, message);
+
+    // Prefer Twilio success if it worked
+    if (twilioResult.ok) {
+      return twilioResult;
+    }
+
+    // Both failed; log and return Twilio's error
+    console.error("[SMS FALLBACK ERROR]", {
+      telnyxError: telnyxResult.error,
+      twilioError: twilioResult.error,
+    });
+
+    return twilioResult;
+  }
+
+  // No Twilio configured and Telnyx failed
+  return telnyxResult;
 }
 
-// Optional alias to keep any old code happy
+// Backwards-compat alias if any old code still calls sendSms()
 export const sendSms = sendSmsToNumber;

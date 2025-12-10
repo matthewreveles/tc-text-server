@@ -1,66 +1,124 @@
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.sendSms = sendSms;
 // src/services/smsSender.ts
-const axios_1 = __importDefault(require("axios"));
-const twilio_1 = __importDefault(require("twilio"));
-const normalizePhone_1 = require("./normalizePhone");
+import axios from "axios";
+import twilioLib from "twilio";
+import { normalizeUSPhone } from "./normalizePhone.js";
+// ─────────────────────────────
+// Environment configuration
+// ─────────────────────────────
 const TELNYX_API_KEY = process.env.TELNYX_API_KEY;
+const TELNYX_PROFILE_ID = process.env.TELNYX_MESSAGING_PROFILE_ID;
 const TELNYX_FROM_NUMBER = process.env.TELNYX_FROM_NUMBER;
-const TELNYX_MESSAGING_PROFILE_ID = process.env.TELNYX_MESSAGING_PROFILE_ID;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
-const twilioClient = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
-    ? (0, twilio_1.default)(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+const TWILIO_FROM_NUMBER = process.env.TWILIO_PHONE_NUMBER;
+// Only initialize Twilio client if creds are present
+const twilio = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
+    ? twilioLib(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     : null;
-async function sendSms(toRaw, message) {
-    const to = (0, normalizePhone_1.normalizeUSPhone)(toRaw);
-    if (!to) {
-        return { ok: false, to: toRaw, error: "Invalid phone number format" };
+// ─────────────────────────────
+// Telnyx
+// ─────────────────────────────
+async function sendViaTelnyx(to, message) {
+    if (!TELNYX_API_KEY || !TELNYX_PROFILE_ID || !TELNYX_FROM_NUMBER) {
+        throw new Error("Telnyx configuration missing");
     }
-    // 1) Try Telnyx first if configured
-    if (TELNYX_API_KEY && TELNYX_FROM_NUMBER && TELNYX_MESSAGING_PROFILE_ID) {
-        try {
-            await axios_1.default.post("https://api.telnyx.com/v2/messages", {
-                from: TELNYX_FROM_NUMBER,
+    try {
+        const resp = await axios.post("https://api.telnyx.com/v2/messages", {
+            from: TELNYX_FROM_NUMBER,
+            to,
+            text: message,
+            messaging_profile_id: TELNYX_PROFILE_ID,
+        }, {
+            headers: {
+                Authorization: `Bearer ${TELNYX_API_KEY}`,
+                "Content-Type": "application/json",
+            },
+            timeout: 15000,
+        });
+        if (resp.status >= 200 && resp.status < 300) {
+            return {
+                ok: true,
+                provider: "telnyx",
                 to,
-                text: message,
-                messaging_profile_id: TELNYX_MESSAGING_PROFILE_ID,
-            }, {
-                headers: {
-                    Authorization: `Bearer ${TELNYX_API_KEY}`,
-                    "Content-Type": "application/json",
-                },
-                timeout: 10000,
-            });
-            return { ok: true, provider: "telnyx", to };
+            };
         }
-        catch (err) {
-            console.error("[SMS][TELNYX_ERROR]", err?.response?.data || err?.message || err);
-        }
+        throw new Error(`Telnyx responded with status ${resp.status}`);
     }
-    // 2) Fallback to Twilio
-    if (twilioClient && TWILIO_PHONE_NUMBER) {
-        try {
-            await twilioClient.messages.create({
-                from: TWILIO_PHONE_NUMBER,
-                to,
-                body: message,
-            });
-            return { ok: true, provider: "twilio", to };
-        }
-        catch (err) {
-            console.error("[SMS][TWILIO_ERROR]", err?.message || err);
-            return { ok: false, provider: "twilio", to, error: err?.message || "Unknown Twilio error" };
-        }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : "Unknown Telnyx error";
+        return {
+            ok: false,
+            provider: "telnyx",
+            to,
+            error: msg,
+        };
     }
-    return {
-        ok: false,
-        to,
-        error: "No SMS provider configured (Telnyx/Twilio missing)",
-    };
 }
+// ─────────────────────────────
+// Twilio (fallback)
+// ─────────────────────────────
+async function sendViaTwilio(to, message) {
+    if (!twilio || !TWILIO_FROM_NUMBER) {
+        throw new Error("Twilio configuration missing");
+    }
+    try {
+        await twilio.messages.create({
+            to,
+            from: TWILIO_FROM_NUMBER,
+            body: message,
+        });
+        return {
+            ok: true,
+            provider: "twilio",
+            to,
+        };
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : "Unknown Twilio error";
+        return {
+            ok: false,
+            provider: "twilio",
+            to,
+            error: msg,
+        };
+    }
+}
+// ─────────────────────────────
+// Public API used by routes
+// ─────────────────────────────
+export async function sendSmsToNumber(rawTo, message) {
+    const normalized = normalizeUSPhone(rawTo);
+    // Guard against bad phone numbers from forms, etc.
+    if (!normalized) {
+        return {
+            ok: false,
+            provider: "telnyx", // first provider we *would* have used
+            to: rawTo,
+            error: "Invalid phone number",
+        };
+    }
+    const to = normalized;
+    // Try Telnyx first
+    const telnyxResult = await sendViaTelnyx(to, message);
+    if (telnyxResult.ok) {
+        return telnyxResult;
+    }
+    // Fallback to Twilio if configured
+    if (twilio) {
+        const twilioResult = await sendViaTwilio(to, message);
+        // Prefer Twilio success if it worked
+        if (twilioResult.ok) {
+            return twilioResult;
+        }
+        // Both failed; log and return Twilio's error
+        console.error("[SMS FALLBACK ERROR]", {
+            telnyxError: telnyxResult.error,
+            twilioError: twilioResult.error,
+        });
+        return twilioResult;
+    }
+    // No Twilio configured and Telnyx failed
+    return telnyxResult;
+}
+// Backwards-compat alias if any old code still calls sendSms()
+export const sendSms = sendSmsToNumber;

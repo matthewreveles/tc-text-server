@@ -1,12 +1,9 @@
-"use strict";
 // src/services/normalizePhone.ts
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.normalizeUSPhone = normalizeUSPhone;
 /**
  * Normalize a US phone number into +1XXXXXXXXXX format.
  * Very basic, assumes US numbers.
  */
-function normalizeUSPhone(raw) {
+export function normalizeUSPhone(raw) {
     if (!raw)
         return null;
     const digits = raw.replace(/\D/g, "");

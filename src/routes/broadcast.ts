@@ -1,15 +1,23 @@
 // src/routes/broadcast.ts
 import { Router } from "express";
-import { prisma } from "../prisma";
-import { sendSmsToNumber, type SmsSendResult } from "../services/smsSender";
+import { prisma } from "../prisma.js";
+import { sendSmsToNumber, type SmsSendResult } from "../services/smsSender.js";
 
-export const broadcastRouter = Router();
+const router = Router();
 
-broadcastRouter.post("/broadcast", async (req, res) => {
-  const body = req.body as { message?: string };
-  const message = (body.message || "").trim();
+/**
+ * POST /sms/broadcast
+ * Body: { message: string }
+ *
+ * Sends a one-off blast to all users who:
+ *  - have a phone number
+ *  - smsOptIn === true
+ *  - smsStatus === "active" (or null / undefined)
+ */
+router.post("/broadcast", async (req, res) => {
+  const { message } = req.body as { message?: string };
 
-  if (!message) {
+  if (!message || !message.trim()) {
     return res.status(400).json({
       ok: false,
       error: "Message is required.",
@@ -17,12 +25,14 @@ broadcastRouter.post("/broadcast", async (req, res) => {
   }
 
   try {
-    // All opted-in users with active SMS and a phone number
     const users = await prisma.user.findMany({
       where: {
         smsOptIn: true,
-        smsStatus: "active",
         phone: { not: null },
+        OR: [
+          { smsStatus: null },
+          { smsStatus: "active" },
+        ],
       },
       select: {
         id: true,
@@ -30,35 +40,48 @@ broadcastRouter.post("/broadcast", async (req, res) => {
       },
     });
 
-    const results: SmsSendResult[] = [];
-
-    for (const user of users) {
-      const phone = user.phone;
-      if (!phone) {
-        continue;
-      }
-
-      // serial on purpose here; volume is small for now
-      // eslint-disable-next-line no-await-in-loop
-      const result = await sendSmsToNumber(phone, message);
-      results.push(result);
+    if (!users.length) {
+      return res.status(200).json({
+        ok: true,
+        attempted: 0,
+        sent: 0,
+        results: [],
+        note: "No opted-in users with valid phone numbers.",
+      });
     }
 
-    const attempted = results.length;
-    const sent = results.filter((r: SmsSendResult) => r.ok).length;
+    const results: SmsSendResult[] = [];
+    for (const user of users) {
+      if (!user.phone) continue;
 
-    return res.json({
+      try {
+        const result = await sendSmsToNumber(user.phone, message);
+        results.push(result);
+      } catch (err) {
+        results.push({
+          ok: false,
+          provider: "telnyx",
+          to: user.phone,
+          error: err instanceof Error ? err.message : "Unknown error",
+        });
+      }
+    }
+
+    const successCount = results.filter((r) => r.ok).length;
+
+    return res.status(200).json({
       ok: true,
-      attempted,
-      sent,
+      attempted: results.length,
+      sent: successCount,
       results,
     });
   } catch (err) {
-    console.error("[SMS_BROADCAST_ERROR]", err);
-
+    console.error("[SMS BROADCAST ERROR]", err);
     return res.status(500).json({
       ok: false,
-      error: "Unexpected server error.",
+      error: "Failed to send broadcast SMS.",
     });
   }
 });
+
+export { router as broadcastRouter };
