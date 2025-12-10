@@ -1,19 +1,23 @@
 // src/routes/broadcast.ts
-import { Router, Request, Response } from "express";
+import { Router } from "express";
 import { prisma } from "../prisma";
-import { sendSms } from "../services/smsSender";
+import { sendSmsToNumber, type SmsSendResult } from "../services/smsSender";
 
 export const broadcastRouter = Router();
 
-// POST /sms/broadcast { message: "..." }
-broadcastRouter.post("/broadcast", async (req: Request, res: Response) => {
-  const message: string | undefined = req.body?.message;
+broadcastRouter.post("/broadcast", async (req, res) => {
+  const body = req.body as { message?: string };
+  const message = (body.message || "").trim();
 
-  if (!message || !message.trim()) {
-    return res.status(400).json({ ok: false, error: "message is required" });
+  if (!message) {
+    return res.status(400).json({
+      ok: false,
+      error: "Message is required.",
+    });
   }
 
   try {
+    // All opted-in users with active SMS and a phone number
     const users = await prisma.user.findMany({
       where: {
         smsOptIn: true,
@@ -26,31 +30,35 @@ broadcastRouter.post("/broadcast", async (req: Request, res: Response) => {
       },
     });
 
-    const seen = new Set<string>();
-    const targets = users
-      .map((u) => u.phone || "")
-      .filter((p) => Boolean(p) && !seen.has(p!))
-      .map((p) => {
-        seen.add(p!);
-        return p!;
-      });
+    const results: SmsSendResult[] = [];
 
-    const results = [];
-    for (const phone of targets) {
-      const result = await sendSms(phone, message);
+    for (const user of users) {
+      const phone = user.phone;
+      if (!phone) {
+        continue;
+      }
+
+      // serial on purpose here; volume is small for now
+      // eslint-disable-next-line no-await-in-loop
+      const result = await sendSmsToNumber(phone, message);
       results.push(result);
     }
 
-    const successCount = results.filter((r) => r.ok).length;
+    const attempted = results.length;
+    const sent = results.filter((r: SmsSendResult) => r.ok).length;
 
     return res.json({
       ok: true,
-      attempted: targets.length,
-      sent: successCount,
+      attempted,
+      sent,
       results,
     });
   } catch (err) {
     console.error("[SMS_BROADCAST_ERROR]", err);
-    return res.status(500).json({ ok: false, error: "Internal server error" });
+
+    return res.status(500).json({
+      ok: false,
+      error: "Unexpected server error.",
+    });
   }
 });

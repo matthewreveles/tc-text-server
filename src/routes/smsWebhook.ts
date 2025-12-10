@@ -1,79 +1,60 @@
 // src/routes/smsWebhook.ts
-import { Router, Request, Response } from "express";
+import { Router } from "express";
 import { prisma } from "../prisma";
-import { normalizeUSPhone } from "../services/normalizePhone";
-import { sendSms } from "../services/smsSender";
 
 export const smsWebhookRouter = Router();
 
-// Twilio-style inbound webhook: POST /webhooks/sms
-smsWebhookRouter.post("/sms", async (req: Request, res: Response) => {
+/**
+ * Handles inbound STOP / HELP / status webhooks from Telnyx/Twilio.
+ * For now we only update our local user record; no reply SMS needed here.
+ */
+smsWebhookRouter.post("/", async (req, res) => {
   try {
-    const fromRaw: string | undefined = req.body.From || req.body.from;
-    const bodyRaw: string | undefined = req.body.Body || req.body.text;
+    const body: any = req.body;
 
-    const from = normalizeUSPhone(fromRaw);
-    const body = (bodyRaw || "").trim().toUpperCase();
+    // Flexible extraction of "from" and "text" across providers
+    const fromRaw: string | undefined =
+      body.from ||
+      body.From ||
+      body.data?.payload?.from?.phone_number ||
+      body.data?.payload?.from;
 
-    if (!from) {
-      console.warn("[SMS_WEBHOOK] Missing or invalid From:", fromRaw);
-      return res.status(200).send("<Response></Response>");
+    const textRaw: string | undefined =
+      body.text ||
+      body.Body ||
+      body.data?.payload?.text ||
+      body.data?.payload?.body;
+
+    if (!fromRaw) {
+      // Nothing useful in this webhook
+      return res.status(200).json({ ok: true, ignored: true });
     }
 
-    if (!body) {
-      return res.status(200).send("<Response></Response>");
+    const from = String(fromRaw);
+    const text = String(textRaw || "").trim().toUpperCase();
+
+    let smsStatus: string | null = null;
+
+    if (text === "STOP" || text === "STOPALL" || text === "UNSUBSCRIBE") {
+      smsStatus = "stopped";
+    } else if (text === "HELP") {
+      smsStatus = "help";
     }
 
-    // STOP keywords
-    const stopKeywords = ["STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"];
-    const isStop = stopKeywords.includes(body);
-
-    const isHelp = body === "HELP";
-
-    if (isStop) {
-      const now = new Date();
-
+    if (smsStatus) {
       await prisma.user.updateMany({
         where: { phone: from },
         data: {
-          smsOptIn: false,
-          smsStatus: "stopped",
-          smsOptOutAt: now,
+          smsStatus,
+          smsOptIn: smsStatus !== "stopped",
+          smsOptOutAt: smsStatus === "stopped" ? new Date() : null,
         },
       });
-
-      await sendSms(
-        from,
-        "You’ve been unsubscribed from Trap Culture texts. No more messages will be sent. HELP for help."
-      );
-
-      return res
-        .status(200)
-        .send('<Response><Message>Unsubscribed.</Message></Response>');
     }
 
-    if (isHelp) {
-      await sendSms(
-        from,
-        "Trap Culture SMS: merch drops, events, exclusives. STOP to opt out. Std rates apply."
-      );
-
-      await prisma.user.updateMany({
-        where: { phone: from },
-        data: {
-          smsStatus: "help",
-        },
-      });
-
-      return res
-        .status(200)
-        .send('<Response><Message>Help info sent.</Message></Response>');
-    }
-
-    // For non-keyword messages, we just return an empty TwiML response
-    return res.status(200).send("<Response></Response>");
+    return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("[SMS_WEBHOOK_ERROR]", err);
-    return res.status(200).send("<Response></Response>");
+    return res.status(500).json({ ok: false });
   }
 });
