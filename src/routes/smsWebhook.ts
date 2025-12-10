@@ -1,69 +1,75 @@
 // src/routes/smsWebhook.ts
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { prisma } from "../prisma.js";
 
-const router = Router();
+const smsWebhookRouter = Router();
 
 /**
- * Telnyx inbound webhook handler
- * We only care about STOP / START-style events to update user status.
+ * Telnyx-style inbound webhook handler.
+ *
+ * Mounted at /sms in src/index.ts, so this path is:
+ *   POST /sms/webhook
  */
-router.post("/", async (req, res) => {
-  try {
-    const payload = req.body as any;
+smsWebhookRouter.post(
+  "/webhook",
+  async (req: Request, res: Response): Promise<Response> => {
+    try {
+      const payload = req.body as any;
 
-    const data = payload?.data;
-    const record = data?.record;
+      const data = payload?.data;
+      const record = data?.record;
 
-    const toNumber: string | undefined = record?.to[0]?.phone_number;
-    const fromNumber: string | undefined = record?.from?.phone_number;
-    const text: string | undefined = record?.text;
+      const toNumber = record?.to?.[0]?.phone_number as string | undefined;
+      const fromNumber = record?.from?.phone_number as string | undefined;
+      const text = record?.text as string | undefined;
 
-    if (!toNumber && !fromNumber) {
-      return res.status(200).json({ ok: true, ignored: true });
+      if (!toNumber && !fromNumber) {
+        return res.status(200).json({ ok: true, ignored: true });
+      }
+
+      const phone = fromNumber || toNumber;
+      if (!phone) {
+        return res.status(200).json({ ok: true, ignored: true });
+      }
+
+      const lowerText = (text || "").trim().toLowerCase();
+
+      // STOP / UNSUBSCRIBE
+      if (lowerText === "stop" || lowerText === "unsubscribe") {
+        await prisma.user.updateMany({
+          where: { phone },
+          data: {
+            smsOptIn: false,
+            smsStatus: "stopped",
+            smsOptOutAt: new Date(),
+          },
+        });
+
+        return res.status(200).json({ ok: true, action: "stopped", phone });
+      }
+
+      // START
+      if (lowerText === "start") {
+        await prisma.user.updateMany({
+          where: { phone },
+          data: {
+            smsOptIn: true,
+            smsStatus: "active",
+            smsOptInAt: new Date(),
+          },
+        });
+
+        return res.status(200).json({ ok: true, action: "started", phone });
+      }
+
+      // Everything else
+      return res.status(200).json({ ok: true, action: "ignored", phone });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[SMS WEBHOOK ERROR]", err);
+      return res.status(500).json({ ok: false, error: msg });
     }
+  },
+);
 
-    const phone = fromNumber || toNumber;
-
-    if (!phone) {
-      return res.status(200).json({ ok: true, ignored: true });
-    }
-
-    const lowerText = (text || "").trim().toLowerCase();
-
-    // Basic STOP / START handling
-    if (lowerText === "stop" || lowerText === "unsubscribe") {
-      await prisma.user.updateMany({
-        where: { phone },
-        data: {
-          smsOptIn: false,
-          smsStatus: "stopped",
-          smsOptOutAt: new Date(),
-        },
-      });
-
-      return res.status(200).json({ ok: true, action: "stopped" });
-    }
-
-    if (lowerText === "start") {
-      await prisma.user.updateMany({
-        where: { phone },
-        data: {
-          smsOptIn: true,
-          smsStatus: "active",
-          smsOptInAt: new Date(),
-        },
-      });
-
-      return res.status(200).json({ ok: true, action: "started" });
-    }
-
-    // Everything else just gets acknowledged
-    return res.status(200).json({ ok: true, action: "ignored" });
-  } catch (err) {
-    console.error("[SMS WEBHOOK ERROR]", err);
-    return res.status(500).json({ ok: false });
-  }
-});
-
-export { router as smsWebhookRouter };
+export { smsWebhookRouter };
