@@ -1,38 +1,29 @@
 // src/routes/broadcast.ts
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { prisma } from "../prisma.js";
-import { sendSmsToNumber, type SmsSendResult } from "../services/smsSender.js";
+import {
+  sendSmsToNumber,
+  type SmsSendResult,
+} from "../services/smsSender.js";
 
-const router = Router();
+export const broadcastRouter = Router();
 
-/**
- * POST /sms/broadcast
- * Body: { message: string }
- *
- * Sends a one-off blast to all users who:
- *  - have a phone number
- *  - smsOptIn === true
- *  - smsStatus === "active" (or null / undefined)
- */
-router.post("/broadcast", async (req, res) => {
+// This becomes POST /sms/broadcast because router is mounted at /sms
+broadcastRouter.post("/broadcast", async (req: Request, res: Response) => {
   const { message } = req.body as { message?: string };
 
   if (!message || !message.trim()) {
-    return res.status(400).json({
-      ok: false,
-      error: "Message is required.",
-    });
+    return res
+      .status(400)
+      .json({ ok: false, error: "Message is required." });
   }
 
   try {
+    // Pull all opted-in users with phone numbers
     const users = await prisma.user.findMany({
       where: {
         smsOptIn: true,
         phone: { not: null },
-        OR: [
-          { smsStatus: null },
-          { smsStatus: "active" },
-        ],
       },
       select: {
         id: true,
@@ -40,17 +31,8 @@ router.post("/broadcast", async (req, res) => {
       },
     });
 
-    if (!users.length) {
-      return res.status(200).json({
-        ok: true,
-        attempted: 0,
-        sent: 0,
-        results: [],
-        note: "No opted-in users with valid phone numbers.",
-      });
-    }
-
     const results: SmsSendResult[] = [];
+
     for (const user of users) {
       if (!user.phone) continue;
 
@@ -62,26 +44,26 @@ router.post("/broadcast", async (req, res) => {
           ok: false,
           provider: "telnyx",
           to: user.phone,
-          error: err instanceof Error ? err.message : "Unknown error",
+          error:
+            err instanceof Error
+              ? err.message
+              : "Unknown SMS error during broadcast",
         });
       }
     }
 
     const successCount = results.filter((r) => r.ok).length;
 
-    return res.status(200).json({
+    return res.json({
       ok: true,
-      attempted: results.length,
+      attempted: users.length,
       sent: successCount,
-      results,
+      failures: results.length - successCount,
     });
   } catch (err) {
     console.error("[SMS BROADCAST ERROR]", err);
-    return res.status(500).json({
-      ok: false,
-      error: "Failed to send broadcast SMS.",
-    });
+    return res
+      .status(500)
+      .json({ ok: false, error: "Broadcast failed; see logs." });
   }
 });
-
-export { router as broadcastRouter };
