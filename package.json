@@ -1,21 +1,37 @@
 {
   "name": "tc-text-server",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Trap Culture SMS Server",
+  "type": "module",
+  "main": "dist/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "echo \"No tests yet\" && exit 0"
   },
-  "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
+    "@prisma/adapter-pg": "^7.1.0",
     "@prisma/client": "^7.1.0",
     "axios": "^1.13.2",
     "bullmq": "^5.65.1",
+    "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "ioredis": "^5.8.2",
-    "prisma": "^7.1.0"
+    "pg": "^8.16.3",
+    "prisma": "^7.1.0",
+    "twilio": "^5.10.7"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.10.2",
+    "@types/pg": "^8.15.6",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3"
   }
 }
